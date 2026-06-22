@@ -1,8 +1,8 @@
 # database_service.py
 
 import os
-import pymongo
-import certifi
+import json
+import psycopg2
 from dotenv import load_dotenv
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
@@ -16,76 +16,138 @@ class DatabaseService:
         dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
         load_dotenv(dotenv_path)
 
-        self.connection_string = os.getenv("MONGO_CONNECTION_STRING")
+        self.connection_string = os.getenv("SUPABASE_CONNECTION_STRING") or os.getenv("DATABASE_URL")
         if not self.connection_string:
-            raise ValueError("CRITICAL: MONGO_CONNECTION_STRING environment variable is not set.")
+            print("⚠️ WARNING: SUPABASE_CONNECTION_STRING or DATABASE_URL is not set.")
+            self.conn = None
+        else:
+            try:
+                print("Trying to connect to PostgreSQL/Supabase...")
+                self.conn = psycopg2.connect(self.connection_string)
+                self.conn.autocommit = True
+                self.init_db()
+                print("✅ PostgreSQL/Supabase connected and initialized successfully.")
+            except Exception as e:
+                print(f"❌ PostgreSQL/Supabase connection failed: {e}")
+                self.conn = None
 
+    def init_db(self):
+        if not self.conn:
+            return
         try:
-            print("Trying to connect to MongoDB with certifi...")
-            self.client = pymongo.MongoClient(
-                self.connection_string,
-                serverSelectionTimeoutMS=5000,
-                tlsCAFile=certifi.where()
-            )
-            self.db = self.client.educonnect_db
-            self.users_collection = self.db.users
-            self.quiz_results_collection = self.db.quiz_results
-            self.client.admin.command('ping')  # Force connection check
-            self.quiz_results_collection.create_index("path")
-            print("✅ MongoDB connected successfully.")
+            with self.conn.cursor() as cur:
+                # Create users table
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    username VARCHAR(255) UNIQUE NOT NULL,
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """)
+                # Create quiz_results table
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS quiz_results (
+                    id SERIAL PRIMARY KEY,
+                    path VARCHAR(500) UNIQUE NOT NULL,
+                    student_id VARCHAR(255) NOT NULL,
+                    subject VARCHAR(255) NOT NULL,
+                    quiz_type VARCHAR(255) NOT NULL,
+                    quiz_name VARCHAR(255) NOT NULL,
+                    timestamp VARCHAR(255) NOT NULL,
+                    performance_breakdown JSONB NOT NULL,
+                    time_taken_seconds INTEGER,
+                    scoring_summary JSONB NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_quiz_results_path ON quiz_results(path);")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_quiz_results_student_id ON quiz_results(student_id);")
+                print("✅ Database tables and indexes verified/created successfully.")
         except Exception as e:
-            print(f"❌ MongoDB connection failed: {e}")
-            self.client = None
+            print(f"❌ Failed to initialize database tables: {e}")
 
     def create_user(self, username: str, email: str, password: str):
-        if self.client is None:
+        if not self.conn:
             return {"status": "error", "message": "Database not connected."}
-        if self.users_collection.find_one({"username": username}):
-            return {"status": "error", "message": "Username already exists."}
-        if self.users_collection.find_one({"email": email}):
-            return {"status": "error", "message": "Email already registered."}
-
-        hashed_password = pwd_context.hash(password)
-        user_document = {
-            "username": username,
-            "email": email,
-            "password_hash": hashed_password,
-            "created_at": datetime.now().isoformat()
-        }
-
         try:
-            self.users_collection.insert_one(user_document)
-            return {"status": "success", "message": "User created successfully."}
-        except Exception:
-            return {"status": "error", "message": "Could not create user."}
+            with self.conn.cursor() as cur:
+                # Check username
+                cur.execute("SELECT username FROM users WHERE username = %s;", (username,))
+                if cur.fetchone():
+                    return {"status": "error", "message": "Username already exists."}
+                # Check email
+                cur.execute("SELECT email FROM users WHERE email = %s;", (email,))
+                if cur.fetchone():
+                    return {"status": "error", "message": "Email already registered."}
+                
+                hashed_password = pwd_context.hash(password)
+                cur.execute(
+                    "INSERT INTO users (username, email, password_hash) VALUES (%s, %s, %s);",
+                    (username, email, hashed_password)
+                )
+                return {"status": "success", "message": "User created successfully."}
+        except Exception as e:
+            print(f"Error creating user: {e}")
+            return {"status": "error", "message": f"Could not create user: {str(e)}"}
 
     def authenticate_user(self, username: str, password: str):
-        user = self.users_collection.find_one({"username": username})
-        if not user or not pwd_context.verify(password, user["password_hash"]):
+        if not self.conn:
             return False
-        return user
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT username, email, password_hash FROM users WHERE username = %s;", (username,))
+                row = cur.fetchone()
+                if not row:
+                    return False
+                user = {"username": row[0], "email": row[1], "password_hash": row[2]}
+                if not pwd_context.verify(password, user["password_hash"]):
+                    return False
+                return user
+        except Exception as e:
+            print(f"Authentication error: {e}")
+            return False
 
     def check_username_exists(self, username: str) -> bool:
-        if self.client is None:
+        if not self.conn:
             return False
-        return self.users_collection.find_one({"username": username}) is not None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE username = %s;", (username,))
+                return cur.fetchone() is not None
+        except Exception as e:
+            print(f"Error checking username: {e}")
+            return False
 
     def check_email_exists(self, email: str) -> bool:
-        if self.client is None:
+        if not self.conn:
             return False
-        return self.users_collection.find_one({"email": email}) is not None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM users WHERE email = %s;", (email,))
+                return cur.fetchone() is not None
+        except Exception as e:
+            print(f"Error checking email: {e}")
+            return False
 
     def get_user_quiz_history_summary(self, username: str) -> dict:
-        if self.client is None:
+        if not self.conn:
             return {'unique_unit_quizzes_attempted': 0}
-        distinct_quizzes = self.quiz_results_collection.distinct(
-            'quiz_name',
-            {'student_id': username, 'quiz_type': 'Unit-Quizzes'}
-        )
-        return {'unique_unit_quizzes_attempted': len(distinct_quizzes)}
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT quiz_name FROM quiz_results WHERE student_id = %s AND quiz_type = 'Unit-Quizzes';",
+                    (username,)
+                )
+                rows = cur.fetchall()
+                return {'unique_unit_quizzes_attempted': len(rows)}
+        except Exception as e:
+            print(f"Error getting quiz history summary: {e}")
+            return {'unique_unit_quizzes_attempted': 0}
 
     def save_quiz_result(self, result_data: dict):
-        if self.client is None:
+        if not self.conn:
             return {"status": "error", "message": "Database not connected."}
 
         student_id = result_data.get("student_id")
@@ -126,120 +188,174 @@ class DatabaseService:
 
         path = f"{student_id}/{subject}/{'Grand-Quiz' if quiz_type == 'Grand-Quiz' else quiz_name}/{timestamp}"
 
-        doc_to_store = {
-            "path": path,
-            "student_id": student_id,
-            "subject": subject,
-            "quiz_type": quiz_type,
-            "quiz_name": quiz_name,
-            "timestamp": timestamp,
-            "performance_breakdown": performance,
-            "time_taken_seconds": time_taken,
-            "scoring_summary": scoring_summary
-        }
-
         try:
-            self.quiz_results_collection.insert_one(doc_to_store)
-            return {"status": "success", "message": "Quiz result saved with structured path."}
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO quiz_results 
+                    (path, student_id, subject, quiz_type, quiz_name, timestamp, performance_breakdown, time_taken_seconds, scoring_summary) 
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    (
+                        path, student_id, subject, quiz_type, quiz_name, timestamp,
+                        json.dumps(performance), time_taken, json.dumps(scoring_summary)
+                    )
+                )
+                return {"status": "success", "message": "Quiz result saved with structured path."}
         except Exception as e:
             print(f"Error saving quiz result: {e}")
-            return {"status": "error", "message": "Could not save quiz result."}
+            return {"status": "error", "message": f"Could not save quiz result: {str(e)}"}
 
     def get_full_quiz_history(self, username: str = None) -> List[Dict]:
-        if self.client is None:
+        if not self.conn:
             return []
-        query = {}
-        if username:
-            query["student_id"] = username
-
-        cursor = self.quiz_results_collection.find(
-            query,
-            {"_id": 0}
-        ).sort("timestamp", pymongo.DESCENDING)
-        return list(cursor)
+        try:
+            with self.conn.cursor() as cur:
+                if username:
+                    cur.execute(
+                        "SELECT path, student_id, subject, quiz_type, quiz_name, timestamp, performance_breakdown, time_taken_seconds, scoring_summary FROM quiz_results WHERE student_id = %s ORDER BY timestamp DESC;",
+                        (username,)
+                    )
+                else:
+                    cur.execute(
+                        "SELECT path, student_id, subject, quiz_type, quiz_name, timestamp, performance_breakdown, time_taken_seconds, scoring_summary FROM quiz_results ORDER BY timestamp DESC;"
+                    )
+                rows = cur.fetchall()
+                results = []
+                for r in rows:
+                    results.append({
+                        "path": r[0],
+                        "student_id": r[1],
+                        "subject": r[2],
+                        "quiz_type": r[3],
+                        "quiz_name": r[4],
+                        "timestamp": r[5],
+                        "performance_breakdown": r[6] if isinstance(r[6], list) else json.loads(r[6]) if isinstance(r[6], str) else r[6],
+                        "time_taken_seconds": r[7],
+                        "scoring_summary": r[8] if isinstance(r[8], dict) else json.loads(r[8]) if isinstance(r[8], str) else r[8],
+                    })
+                return results
+        except Exception as e:
+            print(f"Error getting full quiz history: {e}")
+            return []
 
     def get_full_quiz_history_for_unit(self, username: str, unit_name: str) -> List[Dict]:
-        if self.client is None:
+        if not self.conn:
             return []
-        cursor = self.quiz_results_collection.find(
-            {"student_id": username, "quiz_name": unit_name},
-            {"_id": 0}
-        ).sort("timestamp", pymongo.DESCENDING)
-        return list(cursor)
-    
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT path, student_id, subject, quiz_type, quiz_name, timestamp, performance_breakdown, time_taken_seconds, scoring_summary FROM quiz_results WHERE student_id = %s AND quiz_name = %s ORDER BY timestamp DESC;",
+                    (username, unit_name)
+                )
+                rows = cur.fetchall()
+                results = []
+                for r in rows:
+                    results.append({
+                        "path": r[0],
+                        "student_id": r[1],
+                        "subject": r[2],
+                        "quiz_type": r[3],
+                        "quiz_name": r[4],
+                        "timestamp": r[5],
+                        "performance_breakdown": r[6] if isinstance(r[6], list) else json.loads(r[6]) if isinstance(r[6], str) else r[6],
+                        "time_taken_seconds": r[7],
+                        "scoring_summary": r[8] if isinstance(r[8], dict) else json.loads(r[8]) if isinstance(r[8], str) else r[8],
+                    })
+                return results
+        except Exception as e:
+            print(f"Error getting quiz history for unit: {e}")
+            return []
     
     def get_dashboard_analytics(self, username: str, time_period_days: int) -> Dict:
         """
         Fetches and aggregates user performance data for the dashboard view.
         Filters by a specific time period.
         """
-        if self.client is None:
+        if not self.conn:
             return {}
         
-        # --- Date Filtering Logic ---
-        query = {"student_id": username}
-        if time_period_days > 0:
-            # Calculate the date to filter from
-            start_date = datetime.now() - timedelta(days=time_period_days)
-            # Add the date condition to the MongoDB query
-            query["timestamp"] = {"$gte": start_date.isoformat()}
+        try:
+            with self.conn.cursor() as cur:
+                if time_period_days > 0:
+                    start_date = datetime.now() - timedelta(days=time_period_days)
+                    cur.execute(
+                        "SELECT performance_breakdown FROM quiz_results WHERE student_id = %s AND timestamp >= %s;",
+                        (username, start_date.isoformat())
+                    )
+                else:
+                    cur.execute(
+                        "SELECT performance_breakdown FROM quiz_results WHERE student_id = %s;",
+                        (username,)
+                    )
+                rows = cur.fetchall()
 
-        # Fetch all relevant quiz results within the time period
-        quiz_results = list(self.quiz_results_collection.find(query))
+                dashboard_data = {}
+                levels = ["easy", "medium", "hard"]
+                types = ["direct", "logical reasoning", "aptitude"]
 
-        # --- Aggregation Logic (DAA - Iteration/Counting) ---
-        # This will hold our 3x3 grid data, e.g., dashboard_data['easy']['direct']
-        dashboard_data = {}
-        
-        # Define the categories for the grid
-        levels = ["easy", "medium", "hard"]
-        types = ["direct", "logical reasoning", "aptitude"]
+                for level in levels:
+                    dashboard_data[level] = {}
+                    for type_ in types:
+                        dashboard_data[level][type_] = {"total": 0, "correct": 0}
 
-        # Initialize the grid structure
-        for level in levels:
-            dashboard_data[level] = {}
-            for type_ in types:
-                dashboard_data[level][type_] = {"total": 0, "correct": 0}
+                for r in rows:
+                    pb = r[0]
+                    if isinstance(pb, str):
+                        pb = json.loads(pb)
+                    for question in pb:
+                        level = question.get("difficulty_level", "unknown")
+                        type_ = question.get("difficulty_type", "unknown")
 
-        # Loop through every question from every fetched quiz
-        for result in quiz_results:
-            for question in result.get("performance_breakdown", []):
-                level = question.get("difficulty_level", "unknown")
-                type_ = question.get("difficulty_type", "unknown")
-
-                # Check if the category is one we are tracking
-                if level in levels and type_ in types:
-                    dashboard_data[level][type_]["total"] += 1
-                    if question.get("is_correct"):
-                        dashboard_data[level][type_]["correct"] += 1
-        
-        return dashboard_data
-
+                        if level in levels and type_ in types:
+                            dashboard_data[level][type_]["total"] += 1
+                            if question.get("is_correct"):
+                                dashboard_data[level][type_]["correct"] += 1
+                
+                return dashboard_data
+        except Exception as e:
+            print(f"Error getting dashboard analytics: {e}")
+            return {}
 
     def get_performance_data_for_dashboard(self, username: str, time_period_days: int) -> List[Dict]:
-            """
-            Fetches all quiz results for a user within a specific time period.
-            If time_period_days is 0, it fetches all results.
-            """
-            if self.client is None:
-                return []
+        """
+        Fetches all quiz results for a user within a specific time period.
+        If time_period_days is 0, it fetches all results.
+        """
+        if not self.conn:
+            return []
 
-            # The base query always filters by the current user
-            query = {"student_id": username}
-
-            # If a time period is specified (not 'all time'), add a date filter
-            if time_period_days > 0:
-                # Calculate the date to start filtering from
-                start_date = datetime.now() - timedelta(days=time_period_days)
-                # Add the date condition to the MongoDB query.
-                # '$gte' means "greater than or equal to".
-                query["timestamp"] = {"$gte": start_date.isoformat()}
-            
-            # Execute the query to find all matching documents
-            cursor = self.quiz_results_collection.find(query, {"_id": 0})
-            
-            return list(cursor)
-    
+        try:
+            with self.conn.cursor() as cur:
+                if time_period_days > 0:
+                    start_date = datetime.now() - timedelta(days=time_period_days)
+                    cur.execute(
+                        "SELECT path, student_id, subject, quiz_type, quiz_name, timestamp, performance_breakdown, time_taken_seconds, scoring_summary FROM quiz_results WHERE student_id = %s AND timestamp >= %s;",
+                        (username, start_date.isoformat())
+                    )
+                else:
+                    cur.execute(
+                        "SELECT path, student_id, subject, quiz_type, quiz_name, timestamp, performance_breakdown, time_taken_seconds, scoring_summary FROM quiz_results WHERE student_id = %s;",
+                        (username,)
+                    )
+                rows = cur.fetchall()
+                results = []
+                for r in rows:
+                    results.append({
+                        "path": r[0],
+                        "student_id": r[1],
+                        "subject": r[2],
+                        "quiz_type": r[3],
+                        "quiz_name": r[4],
+                        "timestamp": r[5],
+                        "performance_breakdown": r[6] if isinstance(r[6], list) else json.loads(r[6]) if isinstance(r[6], str) else r[6],
+                        "time_taken_seconds": r[7],
+                        "scoring_summary": r[8] if isinstance(r[8], dict) else json.loads(r[8]) if isinstance(r[8], str) else r[8],
+                    })
+                return results
+        except Exception as e:
+            print(f"Error getting performance data for dashboard: {e}")
+            return []
     
 # Instantiate globally
 database_service = DatabaseService()
