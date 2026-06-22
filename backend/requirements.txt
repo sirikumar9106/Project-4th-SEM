@@ -46,3 +46,4 @@ passlib[bcrypt]
 python-jose[cryptography]
 numpy
 scikit-learn
+email-validator
