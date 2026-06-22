@@ -121,7 +121,7 @@ graph TD
 
 ## 🎯 Project Objectives & Technical Implementation
 
-EduConnect achieves four core objectives through targeted algorithms and mathematical relationships:
+EduConnect achieves its core objectives through targeted algorithms, mathematical relationships, and network-optimized content caching:
 
 ### Objective 1: Dynamic Learner Profiling
 *   **Goal**: Classify students dynamically into profile groups (`Slow Learner`, `Average Learner`, and `Quick Learner`) based on their historical accuracy and response speed.
@@ -146,10 +146,8 @@ EduConnect achieves four core objectives through targeted algorithms and mathema
     For every subtopic ($s$) in topic ($t$) within a syllabus unit ($U$), the engine computes the student's **Error Rate** ($ER_s$):
     $$ER_s = 1 - \frac{\text{Correct Answers}_s}{\text{Total Questions}_s}$$
     Priority is classified dynamically:
-    $$\text{Priority}(s) = \begin{cases} 
-      \text{High-Priority} & \text{if } ER_s \ge 0.5 \\
-      \text{Needs Review} & \text{if } 0 < ER_s < 0.5 
-    \end{cases}$$
+    *   **High-Priority**: if $ER_s \ge 0.5$
+    *   **Needs Review**: if $0 < ER_s < 0.5$
 *   **Algorithm (Greedy Categorization)**:
     The DAA engine sequentially processes historical records to map performance. It builds a nested hierarchy:
     $$\text{Unit } \rightarrow \text{Topic } \rightarrow \text{Subtopics (filtered by priority)}$$
@@ -164,10 +162,11 @@ EduConnect achieves four core objectives through targeted algorithms and mathema
     *   **Efficiency Index** ($EI_d$):
         $$EI_d = AI_d \times \left( \frac{45.0 \text{ seconds}}{\text{Avg. Time per Question}} \right) \times 100$$
 
-### Objective 4: Adaptive Quiz Generation
-*   **Goal**: Generate unit-wise and grand quizzes matching the syllabus structure and target difficulty configurations.
-*   **Implementation**:
-    The system reads template schemas and structures quizzes dynamically based on the student's profile, selecting questions corresponding to the required difficulty parameters.
+### Objective 4: Adaptive Quiz Generation & Offline Content Delivery (CDN)
+*   **Goal**: Generate adaptive quiz components matching the syllabus structure and enable resilient, offline access to study materials for students in rural areas with low network bandwidth.
+*   **Implementation & Network Optimization**:
+    *   **Quiz Generation**: The system dynamically selects question profiles based on the student's profile difficulty thresholds.
+    *   **Offline Content Delivery Network (CDN)**: To accommodate students studying in rural regions with weak signals and high-latency connections, the platform's study notes (PDFs) are served via CDN edge caching strategies and client-side storage cache layers. Once fetched once, materials are saved locally in the browser's persistent cache. This allows students to load, view, and read their study materials offline or under highly restricted bandwidth conditions, minimizing subsequent server requests and eliminating download delays.
 
 ---
 
